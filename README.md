@@ -141,6 +141,74 @@ curl -s -X POST http://localhost:8000/api/v1/validate-layout \
   （`occupied_bytes / size`）及该区域关联的 `violations`；顶层 `violations`
   汇总全部违规。`ok` 仅在 HEX 有效且无任何违规时为 `true`。
 
+### `POST /api/v1/plan-relocation`
+
+固件整体重定位规划：对**所有固件段和入口地址施加同一个整数 `delta`**，
+段内容与段间距离保持不变。在 `hex_text`、`regions` 之外可传 `max_abs_shift`
+限制 `|delta|`。同样复用 HEX 解析与区域定义校验，任一无效即只返回诊断、
+不做规划。
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/plan-relocation \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "hex_text": ":020000040800F2\n:10000000214601360121470136007EFE09D2190141\n:04000005080001C12D\n:00000001FF\n",
+    "regions": [
+      {"name": "flash", "start": 134283264, "end": 135266304, "allow_data": true, "allow_entry": true}
+    ],
+    "max_abs_shift": 1048576
+  }' | jq
+```
+
+可行判定（全部为闭区间整数）：
+
+- 每个固件段必须**完整落入**某个 `allow_data=true` 的区域（不允许跨区域边界）；
+- 入口地址（存在时）必须落入某个 `allow_entry=true` 的区域；
+- 搬移后所有地址必须仍为 32 位无符号地址（`0`..`0xFFFFFFFF`）；
+- 给定 `max_abs_shift` 时还须满足 `|delta| <= max_abs_shift`。
+
+响应在上述约束下求交集并合并出全部可行 delta 区间 `feasible_ranges`，
+并选择 **`|delta|` 最小、绝对值相同再取数值较小（偏向负方向）** 的那个：
+
+```json
+{
+  "ok": true,
+  "hex_ok": true,
+  "regions_valid": true,
+  "error_count": 0,
+  "warning_count": 0,
+  "entry_address": 134218177,
+  "total_bytes": 16,
+  "max_abs_shift": 1048576,
+  "feasible": true,
+  "delta": 65536,
+  "abs_shift": 65536,
+  "feasible_ranges": [
+    {"min_delta": 65536, "max_delta": 1048126}
+  ],
+  "relocated_entry_address": 134283713,
+  "relocated_segments": [
+    {"start": 134283264, "end": 134283280, "size": 16,
+     "data_base64": "IUYBNgEhRwE2AH7+CdIZAQ=="}
+  ],
+  "violations": [],
+  "diagnostics": [ ... ]
+}
+```
+
+- `feasible`：是否存在满足全部约束的 delta；为 `false` 时
+  `feasible_ranges` 为空，`delta`/`abs_shift` 为 `null`，
+  且不返回 `relocated_segments`/`relocated_entry_address`。
+- `feasible_ranges[]`：合并后的互不相交闭区间，`min_delta`/`max_delta`
+  均含端点。
+- `delta`：选中的统一搬移量；`relocated_segments[].data_base64` 为段内容，
+  与 `/api/v1/assemble` 相同（搬移只改地址，不改字节）。
+- HEX 无效（`hex_ok=false`、`regions_valid=null`）或区域定义不合法
+  （`regions_valid=false`，`violations` 给出 `invalid_region`/
+  `region_overlap`）时均不规划，`feasible=false`。
+- 省略 `max_abs_shift` 时仅受区域与 32 位地址空间约束；对没有任何段与入口
+  的空映像，可行集无界，返回 `delta=0` 与空的 `feasible_ranges`。
+
 ## 解析规则
 
 - 每行必须形如 `:llaaaatt<data>cc`；校验 `ll`（字节数）与实际数据长度一致，
@@ -163,9 +231,11 @@ app/
   main.py        # FastAPI 应用与请求/响应模型
   hex_parser.py  # Intel HEX 解析与映像组装（纯逻辑，可独立测试）
   layout.py      # 内存布局校验（区域定义检查、段切分、占用统计，纯逻辑）
+  relocation.py  # 整体重定位规划（可行 delta 闭区间求交合并、选最小位移，纯逻辑）
 tests/
-  test_hex_service.py      # 解析器与 assemble 接口
-  test_validate_layout.py  # validate-layout 接口与布局逻辑
+  test_hex_service.py       # 解析器与 assemble 接口
+  test_validate_layout.py   # validate-layout 接口与布局逻辑
+  test_plan_relocation.py   # plan-relocation 接口与重定位逻辑
 Dockerfile
 docker-compose.yml
 requirements.txt       # 运行依赖
