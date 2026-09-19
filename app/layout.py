@@ -85,26 +85,62 @@ def validate_layout(
             report.violations.append(violation)
 
     for region, report in zip(regions, reports):
-        if region.start >= region.end:
-            add(
-                Violation(
-                    kind="invalid_region",
-                    message=(
-                        f"region '{region.name}': start {_fmt(region.start)} must be "
-                        f"less than end {_fmt(region.end)} (half-open interval)"
-                    ),
-                    start=region.start,
-                    end=region.end,
-                    region=region.name,
-                ),
-                report,
-            )
+        violation = _invalid_region_violation(region)
+        if violation is not None:
+            add(violation, report)
+    for violation in _overlapping_region_violations(regions):
+        add(violation)
 
+    regions_valid = not violations
+    if regions_valid:
+        indexed = sorted(enumerate(regions), key=lambda t: (t[1].start, t[1].end))
+        _check_data_placement(segments, indexed, reports, add)
+        _check_entry(entry_address, indexed, reports, add)
+
+    return LayoutResult(
+        ok=not violations,
+        regions_valid=regions_valid,
+        reports=reports,
+        violations=violations,
+    )
+
+
+def region_definition_violations(regions: list[Region]) -> list[Violation]:
+    """Check region definitions alone: non-empty half-open, non-overlapping.
+
+    Returns one ``invalid_region`` violation per empty interval (input
+    order) followed by one ``region_overlap`` violation per overlapping
+    pair. Empty (or no) regions produce no violations.
+    """
+    violations = [
+        v for region in regions if (v := _invalid_region_violation(region)) is not None
+    ]
+    violations.extend(_overlapping_region_violations(regions))
+    return violations
+
+
+def _invalid_region_violation(region: Region) -> Violation | None:
+    if region.start < region.end:
+        return None
+    return Violation(
+        kind="invalid_region",
+        message=(
+            f"region '{region.name}': start {_fmt(region.start)} must be "
+            f"less than end {_fmt(region.end)} (half-open interval)"
+        ),
+        start=region.start,
+        end=region.end,
+        region=region.name,
+    )
+
+
+def _overlapping_region_violations(regions: list[Region]) -> list[Violation]:
     # Sorted by start, adjacent pairs suffice to detect overlaps.
     indexed = sorted(enumerate(regions), key=lambda t: (t[1].start, t[1].end))
+    violations: list[Violation] = []
     for (_, a), (_, b) in zip(indexed, indexed[1:]):
         if a.start < a.end and b.start < b.end and b.start < a.end:
-            add(
+            violations.append(
                 Violation(
                     kind="region_overlap",
                     message=(
@@ -116,18 +152,7 @@ def validate_layout(
                     end=min(a.end, b.end),
                 )
             )
-
-    regions_valid = not violations
-    if regions_valid:
-        _check_data_placement(segments, indexed, reports, add)
-        _check_entry(entry_address, indexed, reports, add)
-
-    return LayoutResult(
-        ok=not violations,
-        regions_valid=regions_valid,
-        reports=reports,
-        violations=violations,
-    )
+    return violations
 
 
 def _check_data_placement(segments, indexed, reports, add) -> None:
